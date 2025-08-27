@@ -4,6 +4,8 @@ import psycopg2
 from datetime import datetime, timedelta
 import json
 from decimal import Decimal
+import difflib
+from collections import defaultdict
 
 app = Flask(__name__)
 CORS(app)
@@ -31,6 +33,95 @@ def get_db_connection():
         print(f"Erro ao conectar com o banco: {e}")
         return None
 
+def calculate_plate_similarity(plate1, plate2):
+    """
+    Calcula a similaridade entre duas placas usando SequenceMatcher.
+    Retorna um valor entre 0 e 1, onde 1 é idêntico.
+    """
+    if not plate1 or not plate2:
+        return 0.0
+    
+    # Normalizar placas (maiúsculo, remover espaços)
+    plate1 = plate1.upper().strip()
+    plate2 = plate2.upper().strip()
+    
+    if plate1 == plate2:
+        return 1.0
+    
+    # Usar SequenceMatcher para calcular similaridade
+    similarity = difflib.SequenceMatcher(None, plate1, plate2).ratio()
+    return similarity
+
+def find_similar_plates(target_plate, plate_list, threshold=0.8):
+    """
+    Encontra placas similares à placa alvo na lista fornecida.
+    Retorna lista de placas que têm similaridade >= threshold.
+    """
+    similar_plates = []
+    for plate in plate_list:
+        similarity = calculate_plate_similarity(target_plate, plate)
+        if similarity >= threshold:
+            similar_plates.append((plate, similarity))
+    
+    return similar_plates
+
+def group_similar_plates(plates_data, similarity_threshold=0.8, time_window=5):
+    """
+    Agrupa placas similares dentro de uma janela de tempo e retorna
+    apenas a com maior confiança para cada grupo.
+    
+    plates_data: lista de dicionários com dados das placas
+    similarity_threshold: limiar de similaridade (0.8 = 80%)
+    time_window: janela de tempo em segundos
+    """
+    # Ordenar por timestamp
+    plates_data.sort(key=lambda x: x['data_hora'])
+    
+    # Grupos de placas similares
+    groups = []
+    processed_plates = set()
+    
+    for i, current_plate in enumerate(plates_data):
+        if current_plate['id'] in processed_plates:
+            continue
+        
+        # Criar novo grupo com a placa atual
+        current_group = [current_plate]
+        processed_plates.add(current_plate['id'])
+        
+        current_time = datetime.fromisoformat(current_plate['data_hora'].replace('Z', '+00:00'))
+        
+        # Procurar por placas similares na janela de tempo
+        for j, other_plate in enumerate(plates_data[i+1:], i+1):
+            if other_plate['id'] in processed_plates:
+                continue
+                
+            other_time = datetime.fromisoformat(other_plate['data_hora'].replace('Z', '+00:00'))
+            time_diff = abs((other_time - current_time).total_seconds())
+            
+            # Se está fora da janela de tempo, parar busca
+            if time_diff > time_window:
+                break
+                
+            # Calcular similaridade
+            similarity = calculate_plate_similarity(
+                current_plate['license_number'], 
+                other_plate['license_number']
+            )
+            
+            if similarity >= similarity_threshold:
+                current_group.append(other_plate)
+                processed_plates.add(other_plate['id'])
+        
+        # Escolher a placa com maior confiança do grupo
+        best_plate = max(current_group, key=lambda x: x['license_number_score'])
+        best_plate['group_size'] = len(current_group)
+        best_plate['similar_plates'] = [p['license_number'] for p in current_group if p != best_plate]
+        
+        groups.append(best_plate)
+    
+    return groups
+
 @app.route('/')
 def index():
     return render_template('index.html')
@@ -42,6 +133,12 @@ def get_placas():
     search = request.args.get('search', '').strip()
     date_from = request.args.get('date_from', '')
     date_to = request.args.get('date_to', '')
+    deduplicate = request.args.get('deduplicate', 'false').lower() == 'true'
+    time_window = int(request.args.get('time_window', 5))  # Janela de tempo em segundos
+    similarity_threshold = float(request.args.get('similarity_threshold', 0.8))  # Limiar de similaridade
+    
+    if deduplicate:
+        return get_placas_deduplicated(page, per_page, search, date_from, date_to, time_window, similarity_threshold)
     
     offset = (page - 1) * per_page
     
@@ -110,7 +207,107 @@ def get_placas():
             'total': total,
             'page': page,
             'per_page': per_page,
-            'total_pages': (total + per_page - 1) // per_page
+            'total_pages': (total + per_page - 1) // per_page,
+            'deduplicated': False
+        })
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        connection.close()
+
+def get_placas_deduplicated(page, per_page, search, date_from, date_to, time_window, similarity_threshold=0.8):
+    """
+    Função aprimorada para retornar placas deduplicadas baseada em janela de tempo e similaridade.
+    Agrupa placas similares (ex: PWS4919 e PUS4919) dentro de uma janela de tempo e 
+    retorna apenas a leitura com maior confiança.
+    """
+    connection = get_db_connection()
+    if not connection:
+        return jsonify({'error': 'Erro de conexão com o banco'}), 500
+    
+    try:
+        cursor = connection.cursor()
+        
+        # Query base para buscar TODOS os dados primeiro (sem paginação)
+        where_conditions = ["1=1"]
+        params = []
+        
+        # Filtro por placa
+        if search:
+            where_conditions.append("license_number ILIKE %s")
+            params.append(f'%{search}%')
+        
+        # Filtro por data
+        if date_from:
+            where_conditions.append("DATE(data_hora) >= %s")
+            params.append(date_from)
+            
+        if date_to:
+            where_conditions.append("DATE(data_hora) <= %s")
+            params.append(date_to)
+        
+        where_clause = " AND ".join(where_conditions)
+        
+        # Buscar todos os dados para processamento em Python
+        query = f"""
+            SELECT id, frame_nmr, car_id, license_number, license_number_score, data_hora
+            FROM transito_leitura_placa 
+            WHERE {where_clause}
+            ORDER BY data_hora DESC
+        """
+        
+        cursor.execute(query, params)
+        raw_results = cursor.fetchall()
+        
+        if not raw_results:
+            return jsonify({
+                'data': [],
+                'total': 0,
+                'page': page,
+                'per_page': per_page,
+                'total_pages': 0,
+                'deduplicated': True,
+                'time_window': time_window,
+                'similarity_threshold': similarity_threshold
+            })
+        
+        # Converter para formato de dicionário para processamento
+        plates_data = []
+        for row in raw_results:
+            plates_data.append({
+                'id': row[0],
+                'frame_nmr': row[1],
+                'car_id': row[2],
+                'license_number': row[3],
+                'license_number_score': float(row[4]) if row[4] else 0,
+                'data_hora': row[5].isoformat() if row[5] else None,
+            })
+        
+        # Aplicar algoritmo de agrupamento por similaridade e tempo
+        deduplicated_plates = group_similar_plates(
+            plates_data, 
+            similarity_threshold=similarity_threshold, 
+            time_window=time_window
+        )
+        
+        # Aplicar paginação nos resultados processados
+        total = len(deduplicated_plates)
+        start_index = (page - 1) * per_page
+        end_index = start_index + per_page
+        paginated_results = deduplicated_plates[start_index:end_index]
+        
+        return jsonify({
+            'data': paginated_results,
+            'total': total,
+            'page': page,
+            'per_page': per_page,
+            'total_pages': (total + per_page - 1) // per_page,
+            'deduplicated': True,
+            'time_window': time_window,
+            'similarity_threshold': similarity_threshold,
+            'original_count': len(raw_results),
+            'reduction_percentage': round((1 - total / len(raw_results)) * 100, 2) if raw_results else 0
         })
         
     except Exception as e:

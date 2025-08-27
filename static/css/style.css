@@ -50,7 +50,32 @@ body {
     border: none;
     border-radius: 0.75rem;
     box-shadow: var(--shadow);
-    transition: all 0.3s ease;
+}
+
+/* Deduplication Controls */
+.deduplication-card {
+    background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+    border: 1px solid #e3e6f0;
+}
+
+.form-check-input:checked {
+    background-color: var(--primary-color);
+    border-color: var(--primary-color);
+}
+
+.form-select-sm {
+    font-size: 0.775rem;
+}
+
+/* Status Messages */
+.alert {
+    border-radius: 0.5rem;
+    border: none;
+}
+
+.alert-info {
+    background: linear-gradient(135deg, #d1ecf1 0%, #bee5eb 100%);
+    color: #0c5460;
 }
 
 .card:hover {

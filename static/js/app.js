@@ -5,6 +5,9 @@ class PlateReaderApp {
         this.currentSearch = '';
         this.currentDateFrom = '';
         this.currentDateTo = '';
+        this.deduplicate = false;
+        this.timeWindow = 5;
+        this.similarityThreshold = 0.8;
         this.charts = {};
         this.init();
     }
@@ -45,6 +48,30 @@ class PlateReaderApp {
 
         document.getElementById('date-to')?.addEventListener('change', () => {
             this.searchPlates();
+        });
+
+        // Deduplication controls
+        document.getElementById('deduplicate-toggle')?.addEventListener('change', (e) => {
+            this.deduplicate = e.target.checked;
+            const timeWindowControl = document.getElementById('time-window-control');
+            if (timeWindowControl) {
+                timeWindowControl.style.display = e.target.checked ? 'block' : 'none';
+            }
+            this.searchPlates();
+        });
+
+        document.getElementById('time-window')?.addEventListener('change', (e) => {
+            this.timeWindow = parseInt(e.target.value);
+            if (this.deduplicate) {
+                this.searchPlates();
+            }
+        });
+
+        document.getElementById('similarity-threshold')?.addEventListener('change', (e) => {
+            this.similarityThreshold = parseFloat(e.target.value);
+            if (this.deduplicate) {
+                this.searchPlates();
+            }
         });
     }
 
@@ -284,6 +311,7 @@ class PlateReaderApp {
         this.currentPage = page;
         const loading = document.getElementById('loading-placas');
         const tbody = document.getElementById('placas-table-body');
+        const statusElement = document.getElementById('deduplication-status');
         
         loading.style.display = 'block';
         tbody.innerHTML = '';
@@ -303,18 +331,66 @@ class PlateReaderApp {
             if (this.currentDateTo) {
                 params.append('date_to', this.currentDateTo);
             }
+            if (this.deduplicate) {
+                params.append('deduplicate', 'true');
+                params.append('time_window', this.timeWindow);
+                params.append('similarity_threshold', this.similarityThreshold);
+            }
 
             const response = await fetch(`/api/placas?${params}`);
             const data = await response.json();
 
             if (response.ok) {
+                // Update status indicator
+                if (statusElement) {
+                    if (data.deduplicated) {
+                        const similarityPercent = Math.round(data.similarity_threshold * 100);
+                        let statusContent = `
+                            <div class="alert alert-info mb-3">
+                                <i class="fas fa-filter me-2"></i>
+                                <strong>Deduplicação ativa:</strong> Mostrando apenas leituras com maior confiança 
+                                em janelas de ${data.time_window} segundos com similaridade ≥ ${similarityPercent}%. 
+                                ${data.total} registros únicos encontrados.
+                        `;
+                        
+                        if (data.original_count && data.reduction_percentage) {
+                            statusContent += `
+                                <br><small class="text-muted">
+                                    Redução de ${data.original_count} para ${data.total} registros 
+                                    (${data.reduction_percentage}% menos duplicatas)
+                                </small>
+                            `;
+                        }
+                        
+                        statusContent += '</div>';
+                        statusElement.innerHTML = statusContent;
+                    } else {
+                        statusElement.innerHTML = '';
+                    }
+                }
+
                 data.data.forEach(placa => {
                     const row = document.createElement('tr');
+                    
+                    // Construir info adicional para placas deduplicadas
+                    let plateInfo = `<strong>${placa.license_number}</strong>`;
+                    if (data.deduplicated && placa.similar_plates && placa.similar_plates.length > 0) {
+                        plateInfo += `<br><small class="text-muted">
+                            <i class="fas fa-layer-group" title="Grupo de placas similares"></i>
+                            Similares: ${placa.similar_plates.join(', ')}
+                        </small>`;
+                    }
+                    if (data.deduplicated && placa.group_size && placa.group_size > 1) {
+                        plateInfo += `<br><small class="badge bg-secondary">
+                            ${placa.group_size} leituras agrupadas
+                        </small>`;
+                    }
+                    
                     row.innerHTML = `
                         <td>${placa.id}</td>
                         <td>${placa.frame_nmr}</td>
                         <td>${placa.car_id}</td>
-                        <td><strong>${placa.license_number}</strong></td>
+                        <td>${plateInfo}</td>
                         <td>${this.getConfidenceBadge(placa.license_number_score)}</td>
                         <td><small>${new Date(placa.data_hora).toLocaleString('pt-BR')}</small></td>
                         <td>
