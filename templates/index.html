@@ -231,12 +231,12 @@
                             <div class="card">
                                 <div class="card-body py-2 px-3">
                                     <div class="form-check form-switch">
-                                        <input class="form-check-input" type="checkbox" id="deduplicate-toggle">
+                                        <input class="form-check-input" type="checkbox" id="deduplicate-toggle" checked>
                                         <label class="form-check-label" for="deduplicate-toggle">
                                             <small><strong>Remover Duplicatas</strong></small>
                                         </label>
                                     </div>
-                                    <div class="mt-2" id="time-window-control" style="display: none;">
+                                    <div class="mt-2" id="time-window-control">
                                         <label for="time-window" class="form-label small mb-1">Janela de tempo (segundos):</label>
                                         <select class="form-select form-select-sm" id="time-window">
                                             <option value="3">3 segundos</option>
@@ -245,7 +245,15 @@
                                             <option value="15">15 segundos</option>
                                             <option value="30">30 segundos</option>
                                         </select>
-                                        <small class="text-muted">Agrupa todas as placas por tempo e mostra apenas a com maior confiança</small>
+                                        <label for="similarity-threshold" class="form-label small mb-1 mt-2">Similaridade:</label>
+                                        <select class="form-select form-select-sm" id="similarity-threshold">
+                                            <option value="0.6" selected>60% - Flexível</option>
+                                            <option value="0.7">70% - Moderado</option>
+                                            <option value="0.8">80% - Rigoroso</option>
+                                            <option value="0.9">90% - Muito rigoroso</option>
+                                            <option value="1.0">100% - Idênticas</option>
+                                        </select>
+                                        <small class="text-muted">Ex: PWS4919 ≈ PUS4919 (60%)</small>
                                     </div>
                                 </div>
                             </div>
