@@ -4,8 +4,6 @@ import psycopg2
 from datetime import datetime, timedelta
 import json
 from decimal import Decimal
-import difflib
-from collections import defaultdict
 
 app = Flask(__name__)
 CORS(app)
@@ -33,94 +31,66 @@ def get_db_connection():
         print(f"Erro ao conectar com o banco: {e}")
         return None
 
-def calculate_plate_similarity(plate1, plate2):
+def group_plates_by_time_window(plates_data, time_window=5):
     """
-    Calcula a similaridade entre duas placas usando SequenceMatcher.
-    Retorna um valor entre 0 e 1, onde 1 é idêntico.
-    """
-    if not plate1 or not plate2:
-        return 0.0
+    Algoritmo simples e eficiente para agrupar placas por janela de tempo.
     
-    # Normalizar placas (maiúsculo, remover espaços)
-    plate1 = plate1.upper().strip()
-    plate2 = plate2.upper().strip()
-    
-    if plate1 == plate2:
-        return 1.0
-    
-    # Usar SequenceMatcher para calcular similaridade
-    similarity = difflib.SequenceMatcher(None, plate1, plate2).ratio()
-    return similarity
-
-def find_similar_plates(target_plate, plate_list, threshold=0.8):
+    1. Ordena todas as placas por timestamp
+    2. Para cada placa, verifica se pode ser agrupada com a anterior
+    3. Se a diferença de tempo for <= time_window, agrupa; senão, inicia novo grupo
+    4. Retorna apenas a placa com maior confiança de cada grupo
     """
-    Encontra placas similares à placa alvo na lista fornecida.
-    Retorna lista de placas que têm similaridade >= threshold.
-    """
-    similar_plates = []
-    for plate in plate_list:
-        similarity = calculate_plate_similarity(target_plate, plate)
-        if similarity >= threshold:
-            similar_plates.append((plate, similarity))
+    if not plates_data:
+        return []
     
-    return similar_plates
-
-def group_similar_plates(plates_data, similarity_threshold=0.8, time_window=5):
-    """
-    Agrupa placas similares dentro de uma janela de tempo e retorna
-    apenas a com maior confiança para cada grupo.
-    
-    plates_data: lista de dicionários com dados das placas
-    similarity_threshold: limiar de similaridade (0.8 = 80%)
-    time_window: janela de tempo em segundos
-    """
     # Ordenar por timestamp
-    plates_data.sort(key=lambda x: x['data_hora'])
+    plates_data.sort(key=lambda x: datetime.fromisoformat(x['data_hora'].replace('Z', '+00:00')))
     
-    # Grupos de placas similares
     groups = []
-    processed_plates = set()
+    current_group = []
     
-    for i, current_plate in enumerate(plates_data):
-        if current_plate['id'] in processed_plates:
-            continue
+    for i, plate in enumerate(plates_data):
+        current_time = datetime.fromisoformat(plate['data_hora'].replace('Z', '+00:00'))
         
-        # Criar novo grupo com a placa atual
-        current_group = [current_plate]
-        processed_plates.add(current_plate['id'])
-        
-        current_time = datetime.fromisoformat(current_plate['data_hora'].replace('Z', '+00:00'))
-        
-        # Procurar por placas similares na janela de tempo
-        for j, other_plate in enumerate(plates_data[i+1:], i+1):
-            if other_plate['id'] in processed_plates:
-                continue
-                
-            other_time = datetime.fromisoformat(other_plate['data_hora'].replace('Z', '+00:00'))
-            time_diff = abs((other_time - current_time).total_seconds())
+        if not current_group:
+            # Primeiro grupo ou primeiro item de um novo grupo
+            current_group = [plate]
+        else:
+            # Verificar se pode ser adicionado ao grupo atual
+            last_plate_in_group = current_group[-1]
+            last_time = datetime.fromisoformat(last_plate_in_group['data_hora'].replace('Z', '+00:00'))
+            time_diff = (current_time - last_time).total_seconds()
             
-            # Se está fora da janela de tempo, parar busca
-            if time_diff > time_window:
-                break
-                
-            # Calcular similaridade
-            similarity = calculate_plate_similarity(
-                current_plate['license_number'], 
-                other_plate['license_number']
-            )
-            
-            if similarity >= similarity_threshold:
-                current_group.append(other_plate)
-                processed_plates.add(other_plate['id'])
-        
-        # Escolher a placa com maior confiança do grupo
-        best_plate = max(current_group, key=lambda x: x['license_number_score'])
-        best_plate['group_size'] = len(current_group)
-        best_plate['similar_plates'] = [p['license_number'] for p in current_group if p != best_plate]
-        
-        groups.append(best_plate)
+            if time_diff <= time_window:
+                # Adicionar ao grupo atual
+                current_group.append(plate)
+            else:
+                # Finalizar grupo atual e iniciar novo
+                if current_group:
+                    groups.append(current_group)
+                current_group = [plate]
     
-    return groups
+    # Adicionar o último grupo
+    if current_group:
+        groups.append(current_group)
+    
+    # Para cada grupo, retornar apenas a placa com maior confiança
+    result = []
+    for group in groups:
+        best_plate = max(group, key=lambda x: x['license_number_score'])
+        best_plate['group_size'] = len(group)
+        best_plate['grouped_plates'] = list(set([p['license_number'] for p in group]))  # Remove duplicatas
+        
+        # Adicionar informações de tempo do grupo
+        times = [datetime.fromisoformat(p['data_hora'].replace('Z', '+00:00')) for p in group]
+        best_plate['group_time_span'] = round((max(times) - min(times)).total_seconds(), 1)
+        
+        result.append(best_plate)
+    
+    # Ordenar resultado por timestamp (mais recente primeiro)
+    result.sort(key=lambda x: datetime.fromisoformat(x['data_hora'].replace('Z', '+00:00')), reverse=True)
+    
+    return result
 
 @app.route('/')
 def index():
@@ -218,9 +188,9 @@ def get_placas():
 
 def get_placas_deduplicated(page, per_page, search, date_from, date_to, time_window, similarity_threshold=0.8):
     """
-    Função aprimorada para retornar placas deduplicadas baseada em janela de tempo e similaridade.
-    Agrupa placas similares (ex: PWS4919 e PUS4919) dentro de uma janela de tempo e 
-    retorna apenas a leitura com maior confiança.
+    Função para retornar placas deduplicadas baseada APENAS em janela de tempo.
+    Agrupa TODAS as placas dentro de uma janela de tempo e 
+    retorna apenas a leitura com maior confiança para cada janela.
     """
     connection = get_db_connection()
     if not connection:
@@ -284,10 +254,9 @@ def get_placas_deduplicated(page, per_page, search, date_from, date_to, time_win
                 'data_hora': row[5].isoformat() if row[5] else None,
             })
         
-        # Aplicar algoritmo de agrupamento por similaridade e tempo
-        deduplicated_plates = group_similar_plates(
+        # Aplicar algoritmo de agrupamento por janela de tempo
+        deduplicated_plates = group_plates_by_time_window(
             plates_data, 
-            similarity_threshold=similarity_threshold, 
             time_window=time_window
         )
         
@@ -305,7 +274,6 @@ def get_placas_deduplicated(page, per_page, search, date_from, date_to, time_win
             'total_pages': (total + per_page - 1) // per_page,
             'deduplicated': True,
             'time_window': time_window,
-            'similarity_threshold': similarity_threshold,
             'original_count': len(raw_results),
             'reduction_percentage': round((1 - total / len(raw_results)) * 100, 2) if raw_results else 0
         })

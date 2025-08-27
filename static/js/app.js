@@ -7,7 +7,6 @@ class PlateReaderApp {
         this.currentDateTo = '';
         this.deduplicate = false;
         this.timeWindow = 5;
-        this.similarityThreshold = 0.8;
         this.charts = {};
         this.init();
     }
@@ -62,13 +61,6 @@ class PlateReaderApp {
 
         document.getElementById('time-window')?.addEventListener('change', (e) => {
             this.timeWindow = parseInt(e.target.value);
-            if (this.deduplicate) {
-                this.searchPlates();
-            }
-        });
-
-        document.getElementById('similarity-threshold')?.addEventListener('change', (e) => {
-            this.similarityThreshold = parseFloat(e.target.value);
             if (this.deduplicate) {
                 this.searchPlates();
             }
@@ -334,7 +326,6 @@ class PlateReaderApp {
             if (this.deduplicate) {
                 params.append('deduplicate', 'true');
                 params.append('time_window', this.timeWindow);
-                params.append('similarity_threshold', this.similarityThreshold);
             }
 
             const response = await fetch(`/api/placas?${params}`);
@@ -344,12 +335,11 @@ class PlateReaderApp {
                 // Update status indicator
                 if (statusElement) {
                     if (data.deduplicated) {
-                        const similarityPercent = Math.round(data.similarity_threshold * 100);
                         let statusContent = `
                             <div class="alert alert-info mb-3">
                                 <i class="fas fa-filter me-2"></i>
-                                <strong>Deduplicação ativa:</strong> Mostrando apenas leituras com maior confiança 
-                                em janelas de ${data.time_window} segundos com similaridade ≥ ${similarityPercent}%. 
+                                <strong>Deduplicação ativa:</strong> Agrupando todas as placas em janelas de ${data.time_window} segundos 
+                                e mostrando apenas a leitura com maior confiança por janela. 
                                 ${data.total} registros únicos encontrados.
                         `;
                         
@@ -374,16 +364,19 @@ class PlateReaderApp {
                     
                     // Construir info adicional para placas deduplicadas
                     let plateInfo = `<strong>${placa.license_number}</strong>`;
-                    if (data.deduplicated && placa.similar_plates && placa.similar_plates.length > 0) {
-                        plateInfo += `<br><small class="text-muted">
-                            <i class="fas fa-layer-group" title="Grupo de placas similares"></i>
-                            Similares: ${placa.similar_plates.join(', ')}
-                        </small>`;
-                    }
                     if (data.deduplicated && placa.group_size && placa.group_size > 1) {
-                        plateInfo += `<br><small class="badge bg-secondary">
-                            ${placa.group_size} leituras agrupadas
+                        // Mostrar informações do grupo de forma mais limpa
+                        const uniquePlates = [...new Set(placa.grouped_plates)]; // Remove duplicatas
+                        plateInfo += `<br><small class="badge bg-secondary mb-1">
+                            ${placa.group_size} leituras em ${placa.group_time_span || 0}s
                         </small>`;
+                        
+                        if (uniquePlates.length > 1) {
+                            plateInfo += `<br><small class="text-muted">
+                                <i class="fas fa-layer-group" title="Variações encontradas"></i>
+                                Variações: ${uniquePlates.filter(p => p !== placa.license_number).join(', ')}
+                            </small>`;
+                        }
                     }
                     
                     row.innerHTML = `
